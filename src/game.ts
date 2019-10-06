@@ -19,7 +19,6 @@ addInitHook(() => {
 });
 
 let COLORS = [
-    '#00ff00','#ff00ff','#00ffff','#ff8800','#0088ff','#ff88ff','#ffff00','#888888',
     '#00ff00','#ff00ff','#00ffff','#ff8800','#0088ff','#ff88ff','#ffff00',
 ]
 
@@ -27,13 +26,15 @@ let COLORS = [
 //
 class Paddle extends Entity {
 
+    dead: Signal;
     usermove: Vec2;
 
     constructor(bounds: Rect) {
 	super(bounds.anchor('s').move(0,-10));
-	let rect = new Rect(-20,-5,40,10);
+	let rect = new Rect(-15,-5,30,10);
 	this.sprites = [new RectSprite('white', rect)];
 	this.collider = rect;
+        this.dead = new Signal(this);
 	this.usermove = new Vec2();
     }
 
@@ -48,6 +49,13 @@ class Paddle extends Entity {
 
     getFencesFor(range: Rect, v: Vec2, context: string): Rect[] {
 	return [this.world.area];
+    }
+
+    onCollided(e:Entity) {
+        if (e instanceof Brick) {
+            this.stop();
+            this.dead.fire();
+        }
     }
 }
 
@@ -65,7 +73,7 @@ class Ball extends Entity {
 	let rect = new Rect(-4,-4,8,8);
 	this.sprites = [new RectSprite('white', rect)];
 	this.collider = rect;
-	this.v = new Vec2(rnd(2)*8-4, -4);
+	this.v = new Vec2(rnd(2)*6-3, -3);
     }
 
     onTick() {
@@ -76,19 +84,42 @@ class Ball extends Entity {
         let v = this.v;
         if (paddle.overlaps(bounds.add(v))) {
             let dx = (paddle.cx() - bounds.cx()) / paddle.width;
-            v = new Vec2(-Math.floor(dx*8), -v.y);
+            v = new Vec2(-sign(dx)*Math.floor(dx*4+4), -v.y);
         } else {
             let hx = new Vec2(-v.x, v.y);
             let hy = new Vec2(v.x, -v.y);
             let hxy = new Vec2(-v.x, -v.y);
-            if (this.movable(bounds, area, v)) {
+            let e = this.movable(bounds, area, v);
+            if (e === null) {
                 ;
-            } else if (this.movable(bounds, area, hx)) {
-                v = hx;
-            } else if (this.movable(bounds, area, hy)) {
-                v = hy;
-            } else if (this.movable(bounds, area, hxy)) {
-                v = hxy;
+            } else {
+                if (e instanceof Brick) {
+                    (e as Brick).knock();
+                }
+                e = this.movable(bounds, area, hy);
+                if (e === null) {
+                    v = hy;
+                } else {
+                    if (e instanceof Brick) {
+                        (e as Brick).knock();
+                    }
+                    e = this.movable(bounds, area, hx);
+                    if (e === null) {
+                        v = hx;
+                    } else {
+                        if (e instanceof Brick) {
+                            (e as Brick).knock();
+                        }
+                        e = this.movable(bounds, area, hxy);
+                        if (e === null) {
+                            v = hxy;
+                        } else {
+                            if (e instanceof Brick) {
+                                (e as Brick).knock();
+                            }
+                        }
+                    }
+                }
 	    }
         }
         if (this.v !== v) {
@@ -98,17 +129,22 @@ class Ball extends Entity {
 	this.pos = this.pos.add(this.v);
     }
 
-    movable(bounds: Rect, area: Rect, v: Vec2) {
+    movable(bounds: Rect, area: Rect, v: Vec2): Entity {
         bounds = bounds.add(v);
-        if (bounds.x < area.x || area.x1() < bounds.x1()) return false;
-        if (bounds.y < area.y) return false;
-	let obstacles = this.getObstaclesFor(bounds, v, null);
-        return (obstacles.length === 0);
-    }
-
-    getObstaclesFor(range: Rect, v: Vec2, context: string): Collider[] {
-        return this.world.getEntityColliders(
-            (e:Entity) => { return (e instanceof Brick) }, range);
+        if (bounds.x < area.x || area.x1() < bounds.x1()) return this;
+        if (bounds.y < area.y) return this;
+	for (let entity of this.world.entities) {
+            if (entity === this) continue;
+	    if (!entity.isRunning()) continue;
+            if (entity instanceof Brick &&
+                (entity as Brick).falling) continue;
+            let collider = entity.getCollider();
+            if (collider === null) continue;
+            if (collider.overlaps(bounds)) {
+                return entity;
+            }
+        }
+        return null;
     }
 }
 
@@ -117,21 +153,53 @@ class Ball extends Entity {
 //
 class Brick extends Entity {
 
-    level = 0;
+    dead: Signal;
+    fall: Signal;
+    ball: Ball;
+    visible = false;
+    falling = false;
 
-    constructor(bounds: Rect, color: string) {
+    constructor(bounds: Rect, color: string, ball: Ball) {
 	super(new Vec2());
+        this.dead = new Signal(this);
+        this.fall = new Signal(this);
+        this.ball = ball;
 	this.sprites = [new RectSprite(color, bounds)];
 	this.collider = bounds;
     }
 
+    onTick() {
+        super.onTick();
+        if (!this.visible) {
+            let ball = this.ball.getCollider().getAABB().inflate(8, 8);
+            if (!ball.overlaps(this.collider)) {
+                this.visible = true;
+            }
+        } else if (this.falling) {
+            this.pos.y += 4;
+            if (!this.getCollider().overlaps(this.world.area)) {
+                this.stop();
+                this.dead.fire();
+            }
+        }
+    }
+
+    knock() {
+        if (!this.falling) {
+            this.falling = true;
+            this.fall.fire();
+	    (this.sprites[0] as RectSprite).color = 'gray';
+	    APP.playSound('fall');
+        }
+    }
+
     isVisible() {
-        return 2 <= this.level;
+        return this.visible;
     }
 
     getCollider(pos: Vec2=null) {
-        if (!this.isVisible()) return null;
-        return this.collider;
+        if (!this.visible) return null;
+        return super.getCollider(pos);
     }
 }
 
@@ -142,7 +210,7 @@ class Game extends GameScene {
 
     paddle: Paddle;
     ball: Ball;
-    bricks: Brick[];
+    rects: Rect[];
 
     scoreBox: TextBox;
     score: number;
@@ -153,21 +221,21 @@ class Game extends GameScene {
         this.world.window = this.screen;
 
 	this.paddle = new Paddle(this.world.area);
+        this.paddle.dead.subscribe((e:Entity) => {
+	    APP.playSound('explosion');
+            this.gameOver();
+        });
 	this.add(this.paddle);
 	this.ball = new Ball(this.world.area, this.paddle);
 	this.add(this.ball);
 
-        this.bricks = [];
+        this.rects = [];
         let bw = 24;
         let x0 = (this.world.area.width - 8*bw)/2 + 4 + 1;
-        for (let y = 0; y < 15; y++) {
-            let color = COLORS[y];
+        for (let y = 0; y < 12; y++) {
             for (let x = 0; x < 8; x++) {
                 let rect = new Rect(x0+x*bw, 30+y*10, bw-2, 8);
-                let brick = new Brick(rect, color);
-                if (y == 0) info(x, rect);
-                this.add(brick);
-                this.bricks.push(brick);
+                this.rects.push(rect);
             }
         }
 
@@ -179,18 +247,24 @@ class Game extends GameScene {
     onTick() {
 	super.onTick();
         let collider = this.ball.getCollider();
-        for (let brick of this.bricks) {
-            if (collider.overlaps(brick.collider)) {
-                if (brick.level == 0) {
-                    brick.level = 1;
-                }
-            } else if (brick.level == 1) {
-                brick.level = 2;
-                this.score++;
-                this.updateScore();
+        for (let i = this.rects.length-1; 0 <= i; i--) {
+            let rect = this.rects[i];
+            if (collider.overlaps(rect)) {
+                let color = choice(COLORS);
+                let brick = new Brick(rect, color, this.ball);
+                brick.dead.subscribe((e:Entity) => { this.rects.push(rect); });
+                brick.fall.subscribe((e:Entity) => {
+                    this.score++;
+	            this.updateScore();
+                });
+                this.add(brick);
+                this.rects.splice(i, 1);
             }
         }
-        if (!this.ball.getCollider().overlaps(this.world.area)) {
+        if (this.ball.isRunning() &&
+            !this.ball.getCollider().overlaps(this.world.area)) {
+	    APP.playSound('miss');
+            this.ball.stop();
             this.gameOver();
         }
     }
